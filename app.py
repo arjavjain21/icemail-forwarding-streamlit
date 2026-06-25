@@ -262,9 +262,22 @@ def main() -> None:
             "Batch size per forwarding request",
             min_value=1,
             max_value=500,
-            value=100,
-            step=10,
-            help="Forwarding API is rate-limited by request count. Bigger batches reduce total requests.",
+            value=25,
+            step=5,
+            help="Lower batches reduce API-side partial-update risk; requests are still rate-limited and verified after completion.",
+        )
+        verify_after = st.checkbox(
+            "Verify mutations with a fresh IceMail fetch after execution",
+            value=True,
+            help="Recommended. After API success, refetches domains and marks any still-wrong forwarding URL as failed.",
+        )
+        verification_delay_seconds = st.number_input(
+            "Seconds to wait before verification fetch",
+            min_value=0.0,
+            max_value=60.0,
+            value=3.0,
+            step=1.0,
+            help="Small delay gives IceMail time to make forwarding changes visible before verification.",
         )
 
         st.divider()
@@ -425,6 +438,8 @@ def main() -> None:
                 "curl_path": curl_path,
                 "user_agent": user_agent,
                 "batch_size": int(batch_size),
+                "verify_after": bool(verify_after),
+                "verification_delay_seconds": float(verification_delay_seconds),
             }
 
         except ApiError as e:
@@ -495,6 +510,15 @@ def main() -> None:
                 op_status.info(f"Completed batch {batch_index}/{total_batches}.")
             elif event_type == "rate_limit_wait":
                 op_status.warning(f"Rate limit safety wait: {round(float(event.get('waited_seconds') or 0), 1)} seconds.")
+            elif event_type == "verification_wait":
+                op_status.info(f"Waiting {round(float(event.get('waited_seconds') or 0), 1)} seconds before verification fetch.")
+            elif event_type == "verification_start":
+                op_status.info(f"Verifying {event.get('domains_to_verify')} domains with a fresh IceMail fetch.")
+            elif event_type == "verification_done":
+                op_status.info(
+                    f"Verification complete: {event.get('domains_verified')} verified, "
+                    f"{event.get('domains_failed')} failed."
+                )
 
         client = build_client(
             api_key=api_key,
@@ -512,6 +536,8 @@ def main() -> None:
                 targets=targets,
                 batch_size=int(config["batch_size"]),
                 progress_callback=operation_progress,
+                verify_after=bool(config.get("verify_after", True)),
+                verification_delay_seconds=float(config.get("verification_delay_seconds", 3.0)),
             )
             ended_at = datetime.now()
             final_summary = build_summary(
