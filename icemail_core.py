@@ -1030,12 +1030,100 @@ def find_domain_cache_files(output_dir: Path, max_age_hours: float) -> List[Tupl
     return candidates
 
 
+def verify_operation_results(
+    client: IceMailClient,
+    action: str,
+    targets: Sequence[OperationTarget],
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    consistency_delay_seconds: float = 2.0,
+) -> None:
+    successful_targets = [t for t in targets if t.status == "success" and t.domain_id]
+    if not successful_targets:
+        return
+
+    if progress_callback:
+        progress_callback({"type": "verification_wait", "waited_seconds": consistency_delay_seconds})
+    if consistency_delay_seconds > 0:
+        time.sleep(consistency_delay_seconds)
+
+    if progress_callback:
+        progress_callback({"type": "verification_start", "domains_to_verify": len(successful_targets)})
+
+    try:
+        refreshed_domains = client.fetch_all_domains()
+    except ApiError as e:
+        message = f"Verification fetch failed after API success: {e}"
+        if e.payload:
+            message += f" | API payload: {e.payload}"
+        for target in successful_targets:
+            target.status = "failed"
+            target.message = message
+        if progress_callback:
+            progress_callback(
+                {
+                    "type": "verification_done",
+                    "domains_verified": 0,
+                    "domains_failed": len(successful_targets),
+                }
+            )
+        return
+
+    records_by_id = {record.domain_id: record for record in refreshed_domains.values()}
+
+    verified_count = 0
+    failed_count = 0
+    for target in successful_targets:
+        record = records_by_id.get(str(target.domain_id))
+        if not record:
+            target.status = "failed"
+            target.message = "Verification failed: domain ID was not present in a fresh IceMail domain fetch."
+            failed_count += 1
+            continue
+
+        current_url = (record.domain_forwarding_url or "").strip()
+        forwarding_flag = record.domain_forwarding
+        if action == "add":
+            if current_url == target.forwarding_url.strip() and forwarding_flag is not False:
+                target.message = f"Verified after fresh fetch: forwarding URL is {current_url}."
+                verified_count += 1
+            else:
+                target.status = "failed"
+                target.message = (
+                    "Verification failed after API success: "
+                    f"expected forwarding URL {target.forwarding_url.strip()}, got {current_url or '[blank]'} "
+                    f"with forwarding flag {forwarding_flag}."
+                )
+                failed_count += 1
+        elif action == "remove":
+            if forwarding_flag is False and not current_url:
+                target.message = "Verified after fresh fetch: forwarding is disabled and URL is blank."
+                verified_count += 1
+            else:
+                target.status = "failed"
+                target.message = (
+                    "Verification failed after API success: forwarding was expected to be disabled with a blank URL, "
+                    f"but fresh fetch returned URL {current_url or '[blank]'} with forwarding flag {forwarding_flag}."
+                )
+                failed_count += 1
+
+    if progress_callback:
+        progress_callback(
+            {
+                "type": "verification_done",
+                "domains_verified": verified_count,
+                "domains_failed": failed_count,
+            }
+        )
+
+
 def execute_operation(
     client: IceMailClient,
     action: str,
     targets: List[OperationTarget],
     batch_size: int,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    verify_after: bool = True,
+    verification_delay_seconds: float = 2.0,
 ) -> List[OperationTarget]:
     started_at = time.time()
 
@@ -1093,6 +1181,15 @@ def execute_operation(
                     }
                 )
 
+        if verify_after:
+            verify_operation_results(
+                client=client,
+                action=action,
+                targets=targets,
+                progress_callback=progress_callback,
+                consistency_delay_seconds=verification_delay_seconds,
+            )
+
         return targets
 
     if action == "remove":
@@ -1140,6 +1237,15 @@ def execute_operation(
                         "elapsed_seconds": round(time.time() - started_at, 2),
                     }
                 )
+
+        if verify_after:
+            verify_operation_results(
+                client=client,
+                action=action,
+                targets=targets,
+                progress_callback=progress_callback,
+                consistency_delay_seconds=verification_delay_seconds,
+            )
 
         return targets
 
