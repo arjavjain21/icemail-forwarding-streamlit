@@ -9,11 +9,12 @@ A local Streamlit UI for bulk IceMail domain forwarding operations.
 3. Auto-detect email/domain column
 4. Add forwarding or remove forwarding
 5. CSV forwarding URL column or one shared forwarding URL
-6. Domain ID cache reuse
-7. Fresh IceMail domain fetch when needed
-8. Rate-limit-safe API execution
-9. Preview before live execution
-10. Downloadable full report, issues report, and summary JSON
+6. Fast uploaded-domain ID lookup in batches of 100
+7. Domain ID cache reuse
+8. Fresh full IceMail domain fetch when needed
+9. Rate-limit-safe API execution
+10. Preview before live execution
+11. Downloadable full report, issues report, and summary JSON
 
 ## Install
 
@@ -54,14 +55,11 @@ Or:
 
 ## Operational rule
 
-Use domain cache for repeat runs on the same domain inventory.
+Choose the domain ID source that matches the job:
 
-Fetch fresh when:
-
-1. You imported or bought new domains
-2. You moved domains between workspaces
-3. Your cache is older than your operational tolerance
-4. You see too many `not_found_in_icemail` results
+1. Use **Fast lookup uploaded domains** for most CSVs. It resolves only the uploaded domains through the lookup API in batches of 100 and avoids downloading the whole workspace inventory.
+2. Use domain cache for repeat runs on the same domain inventory.
+3. Fetch the full domain list when you imported or bought new domains, moved domains between workspaces, your cache is older than your operational tolerance, or you see too many `not_found_in_icemail` results.
 
 ## Note
 
