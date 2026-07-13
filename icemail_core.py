@@ -22,6 +22,7 @@ ALT_BASE_URL = "https://inbox.closelix.com/api/v1"
 DEFAULT_HTTP_ENGINE = "curl"
 DEFAULT_PYTHON_USER_AGENT = "IceMailForwardingManagerStreamlit/1.0"
 MAX_DOMAIN_LIST_LIMIT = 50
+DOMAIN_LOOKUP_BATCH_SIZE = 100
 DEFAULT_CACHE_MAX_AGE_HOURS = 24
 DOMAIN_CACHE_GLOB = "icemail_domain_cache_*.csv"
 
@@ -152,6 +153,11 @@ class IceMailClient:
             raise ValueError("HTTP engine must be either 'python' or 'curl'.")
 
         self.domain_list_limiter = SlidingWindowRateLimiter(
+            max_calls=30,
+            period_seconds=60,
+            min_interval_seconds=0.20,
+        )
+        self.domain_lookup_limiter = SlidingWindowRateLimiter(
             max_calls=30,
             period_seconds=60,
             min_interval_seconds=0.20,
@@ -435,6 +441,83 @@ class IceMailClient:
 
         self.emit({"type": "fetch_done", "fetched": len(all_domains), "total": total_count})
         return all_domains
+
+
+    def lookup_domains(self, domains: Sequence[str], batch_size: int = DOMAIN_LOOKUP_BATCH_SIZE) -> Dict[str, DomainRecord]:
+        normalized_domains: List[str] = []
+        seen = set()
+
+        for domain in domains:
+            normalized = normalize_domain(str(domain))
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_domains.append(normalized)
+
+        batch_size = min(max(1, int(batch_size)), DOMAIN_LOOKUP_BATCH_SIZE)
+        resolved: Dict[str, DomainRecord] = {}
+        total_batches = (len(normalized_domains) + batch_size - 1) // batch_size if normalized_domains else 0
+
+        self.emit(
+            {
+                "type": "lookup_start",
+                "base_url": self.base_url,
+                "http_engine": self.http_engine,
+                "domains_to_lookup": len(normalized_domains),
+                "total_batches": total_batches,
+            }
+        )
+
+        for batch_index, batch in enumerate(chunked(normalized_domains, batch_size), start=1):
+            self.emit(
+                {
+                    "type": "lookup_batch_start",
+                    "batch_index": batch_index,
+                    "total_batches": total_batches,
+                    "domains_in_batch": len(batch),
+                    "resolved": len(resolved),
+                }
+            )
+            payload = self.request(
+                "POST",
+                "/lookup/domains",
+                body={"domains": list(batch)},
+                rate_limiter=self.domain_lookup_limiter,
+            )
+
+            data = payload.get("data", {}) if isinstance(payload, dict) else {}
+            if not isinstance(data, dict):
+                raise ApiError("Domain lookup response did not include a valid data object.", payload=payload)
+
+            for raw_domain, raw_domain_id in data.items():
+                normalized = normalize_domain(str(raw_domain))
+                domain_id = str(raw_domain_id or "").strip()
+                if not normalized or not domain_id:
+                    continue
+
+                resolved[normalized] = DomainRecord(
+                    domain=normalized,
+                    domain_id=domain_id,
+                    raw={"lookup_domain": raw_domain, "lookup_domain_id": raw_domain_id},
+                )
+
+            self.emit(
+                {
+                    "type": "lookup_batch_done",
+                    "batch_index": batch_index,
+                    "total_batches": total_batches,
+                    "resolved": len(resolved),
+                }
+            )
+
+        self.emit(
+            {
+                "type": "lookup_done",
+                "domains_to_lookup": len(normalized_domains),
+                "resolved": len(resolved),
+            }
+        )
+        return resolved
 
     def apply_forwarding(self, domain_ids: Sequence[str], forwarding_url: str) -> Dict[str, Any]:
         return self.request(

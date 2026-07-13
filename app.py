@@ -143,6 +143,34 @@ def build_client(api_key: str, base_url: str, http_engine: str, curl_path: str, 
             if progress_bar:
                 progress_bar.progress(1.0)
             event_box.success(f"Fetched {event.get('fetched')} domains.")
+        elif event_type == "lookup_start":
+            total = event.get("domains_to_lookup") or 0
+            batches = event.get("total_batches") or 0
+            event_box.info(f"Looking up {total} uploaded domains in {batches} batch(es) using {event.get('http_engine')}...")
+        elif event_type == "lookup_batch_start":
+            batch_index = int(event.get("batch_index") or 0)
+            total_batches = int(event.get("total_batches") or 1)
+            if progress_bar:
+                progress_bar.progress(min(0.95, (batch_index - 1) / max(1, total_batches)))
+            event_box.info(
+                f"Looking up domain batch {batch_index}/{total_batches}. "
+                f"Resolved {event.get('resolved') or 0} so far."
+            )
+        elif event_type == "lookup_batch_done":
+            batch_index = int(event.get("batch_index") or 0)
+            total_batches = int(event.get("total_batches") or 1)
+            if progress_bar:
+                progress_bar.progress(min(0.95, batch_index / max(1, total_batches)))
+            event_box.info(
+                f"Completed lookup batch {batch_index}/{total_batches}. "
+                f"Resolved {event.get('resolved') or 0} domains."
+            )
+        elif event_type == "lookup_done":
+            if progress_bar:
+                progress_bar.progress(1.0)
+            event_box.success(
+                f"Resolved {event.get('resolved') or 0} of {event.get('domains_to_lookup') or 0} uploaded domains."
+            )
         elif event_type == "rate_limit_wait":
             event_box.warning(f"Rate limit safety wait: {round(float(event.get('waited_seconds') or 0), 1)} seconds.")
         elif event_type == "retry_wait":
@@ -160,23 +188,49 @@ def build_client(api_key: str, base_url: str, http_engine: str, curl_path: str, 
     )
 
 
+def resolve_domains_for_preview(
+    client: IceMailClient,
+    unique_pairs: List[Tuple[str, str]],
+    cache_mode: str,
+) -> Tuple[Dict[str, Any], str]:
+    if cache_mode != "Fast lookup uploaded domains":
+        return client.fetch_all_domains(), "api:list_domains"
+
+    lookup_domains = getattr(client, "lookup_domains", None)
+    if callable(lookup_domains):
+        return lookup_domains([domain for _, domain in unique_pairs]), "api:lookup_domains"
+
+    st.warning(
+        "Fast lookup is not available in this running app process yet. "
+        "Falling back to a full domain list fetch for this preview; restart the app to enable fast lookup."
+    )
+    return client.fetch_all_domains(), "api:list_domains_fallback_missing_lookup"
+
+
 def render_cache_selector(output_dir: Path, cache_max_age_hours: float) -> Tuple[str, Optional[Path]]:
     caches = find_domain_cache_files(output_dir, cache_max_age_hours)
-
-    if not caches:
-        st.info("No recent domain cache found. A fresh IceMail domain fetch will be required.")
-        return "Fetch fresh", None
-
     cache_labels = [
         f"{path.name} ({row_count} domains, {format_cache_age(age)})"
         for path, age, row_count in caches
     ]
 
+    source_options = [
+        "Fast lookup uploaded domains",
+        "Fetch full domain list",
+    ]
+    if caches:
+        source_options = ["Use most recent cache", "Choose cache"] + source_options
+    else:
+        st.info("No recent domain cache found. You can still use fast lookup or fetch the full domain list.")
+
     cache_mode = st.radio(
         "Domain ID source",
-        ["Use most recent cache", "Choose cache", "Fetch fresh"],
+        source_options,
         index=0,
-        help="Use cache for repeat runs. Fetch fresh after new domains were purchased, imported, or moved.",
+        help=(
+            "Fast lookup resolves only uploaded domains in batches of 100. "
+            "Cache is best for repeat runs. Full fetch is slower but refreshes the complete workspace cache."
+        ),
     )
 
     if cache_mode == "Use most recent cache":
@@ -190,7 +244,11 @@ def render_cache_selector(output_dir: Path, cache_max_age_hours: float) -> Tuple
         path, age, row_count = caches[selected_index]
         return cache_mode, path
 
-    st.warning("Fresh fetch can take several minutes depending on workspace size and API limits.")
+    if cache_mode == "Fast lookup uploaded domains":
+        st.info("Fast lookup resolves only the uploaded domains and does not create or refresh a full domain cache.")
+    else:
+        st.warning("Full fetch can take several minutes depending on workspace size and API limits.")
+
     return cache_mode, None
 
 
@@ -397,13 +455,14 @@ def main() -> None:
                 fetch_status = st.empty()
                 fetch_progress = st.progress(0)
                 client = build_client(api_key, base_url, http_engine, curl_path, user_agent, fetch_status, fetch_progress)
-                icemail_domains = client.fetch_all_domains()
-                domain_source = "api:list_domains"
 
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                cache_path = output_dir / f"icemail_domain_cache_{timestamp}.csv"
-                write_domain_cache(cache_path, icemail_domains)
-                st.success(f"Saved fresh domain cache: {cache_path}")
+                icemail_domains, domain_source = resolve_domains_for_preview(client, unique_pairs, cache_mode)
+
+                if domain_source.startswith("api:list_domains"):
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    cache_path = output_dir / f"icemail_domain_cache_{timestamp}.csv"
+                    write_domain_cache(cache_path, icemail_domains)
+                    st.success(f"Saved fresh domain cache: {cache_path}")
 
             targets = map_targets_to_icemail_domains(unique_pairs, icemail_domains)
             targets.extend(invalid_targets)
