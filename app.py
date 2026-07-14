@@ -188,6 +188,25 @@ def build_client(api_key: str, base_url: str, http_engine: str, curl_path: str, 
     )
 
 
+def resolve_domains_for_preview(
+    client: IceMailClient,
+    unique_pairs: List[Tuple[str, str]],
+    cache_mode: str,
+) -> Tuple[Dict[str, Any], str]:
+    if cache_mode != "Fast lookup uploaded domains":
+        return client.fetch_all_domains(), "api:list_domains"
+
+    lookup_domains = getattr(client, "lookup_domains", None)
+    if callable(lookup_domains):
+        return lookup_domains([domain for _, domain in unique_pairs]), "api:lookup_domains"
+
+    st.warning(
+        "Fast lookup is not available in this running app process yet. "
+        "Falling back to a full domain list fetch for this preview; restart the app to enable fast lookup."
+    )
+    return client.fetch_all_domains(), "api:list_domains_fallback_missing_lookup"
+
+
 def render_cache_selector(output_dir: Path, cache_max_age_hours: float) -> Tuple[str, Optional[Path]]:
     caches = find_domain_cache_files(output_dir, cache_max_age_hours)
     cache_labels = [
@@ -437,13 +456,9 @@ def main() -> None:
                 fetch_progress = st.progress(0)
                 client = build_client(api_key, base_url, http_engine, curl_path, user_agent, fetch_status, fetch_progress)
 
-                if cache_mode == "Fast lookup uploaded domains":
-                    icemail_domains = client.lookup_domains([domain for _, domain in unique_pairs])
-                    domain_source = "api:lookup_domains"
-                else:
-                    icemail_domains = client.fetch_all_domains()
-                    domain_source = "api:list_domains"
+                icemail_domains, domain_source = resolve_domains_for_preview(client, unique_pairs, cache_mode)
 
+                if domain_source.startswith("api:list_domains"):
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     cache_path = output_dir / f"icemail_domain_cache_{timestamp}.csv"
                     write_domain_cache(cache_path, icemail_domains)
