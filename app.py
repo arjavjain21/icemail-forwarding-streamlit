@@ -297,9 +297,13 @@ def main() -> None:
         api_key = st.text_input("IceMail API key", value=default_key, type="password")
 
         base_options = [DEFAULT_BASE_URL, ALT_BASE_URL, "Custom"]
-        base_choice = st.selectbox("API base URL", base_options, index=0)
+        base_choice = st.selectbox(
+            "API base URL",
+            base_options,
+            index=base_options.index(ALT_BASE_URL),
+        )
         if base_choice == "Custom":
-            base_url = st.text_input("Custom base URL", value=DEFAULT_BASE_URL)
+            base_url = st.text_input("Custom base URL", value=ALT_BASE_URL)
         else:
             base_url = base_choice
 
