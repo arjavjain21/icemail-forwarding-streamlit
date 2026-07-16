@@ -41,6 +41,9 @@ icemail_api_key = "your-icemail-api-key"
 
 You can leave `icemail_api_key` blank and enter it in the sidebar.
 
+The API base URL selector defaults to the Closelix endpoint. You can still select
+the IceMail endpoint or enter a custom URL from the sidebar.
+
 ## Run
 
 ```bash
